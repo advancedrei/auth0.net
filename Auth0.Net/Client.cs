@@ -1,5 +1,4 @@
-﻿
-namespace Auth0
+﻿namespace Auth0
 {
     using Newtonsoft.Json;
     using Newtonsoft.Json.Linq;
@@ -20,7 +19,6 @@ namespace Auth0
 
         private readonly string clientID;
         private readonly string clientSecret;
-        private readonly string domain;
         private AccessToken currentToken;
         private readonly RestClient client;
 
@@ -31,16 +29,32 @@ namespace Auth0
         /// <param name="clientSecret">The client secret of the application, as shown in the dashboard settings.</param>
         /// <param name="domain">The domain for the Auth0 server.</param>
         /// <param name="webProxy">Proxy to use for requests made by this client instance. Passed on to underying WebRequest if set.</param>
-        public Client(string clientID, string clientSecret, string domain, IWebProxy webProxy = null)
+        /// <param name="diagnostics">A <see cref="DiagnosticsHeader"/> instance that contains diagnostic information sent to Auth0.  Default = <see cref="DiagnosticsHeader.Default"/> </param>
+        public Client(string clientID, string clientSecret, string domain, IWebProxy webProxy = null, DiagnosticsHeader diagnostics = null)
+            : this(clientID, domain, webProxy, diagnostics)
+        {
+            if (string.IsNullOrEmpty(clientSecret))
+            {
+                throw new ArgumentNullException("clientSecret");
+            }
+
+            this.clientSecret = clientSecret;
+        }
+
+        /// <summary>
+        /// Creates an instance of the client for unauthenticated requests.
+        /// </summary>
+        /// <remarks>This constructor does not take a clientSecret, and thus only provides
+        /// access to operations that don't require a clientSecret or access token.</remarks>
+        /// <param name="clientID">The client id of the application, as shown in the dashboard settings.</param>
+        /// <param name="domain">The domain for the Auth0 server.</param>
+        /// <param name="webProxy">Proxy to use for requests made by this client instance. Passed on to underying WebRequest if set.</param>
+        /// <param name="diagnostics">A <see cref="DiagnosticsHeader"/> instance that contains diagnostic information sent to Auth0.  Default = <see cref="DiagnosticsHeader.Default"/> </param>
+        public Client(string clientID, string domain, IWebProxy webProxy = null, DiagnosticsHeader diagnostics = null)
         {
             if (string.IsNullOrEmpty(clientID))
             {
                 throw new ArgumentNullException("clientID");
-            }
-
-            if (string.IsNullOrEmpty(clientSecret))
-            {
-                throw new ArgumentNullException("clientSecret");
             }
 
             if (string.IsNullOrEmpty(domain))
@@ -49,15 +63,41 @@ namespace Auth0
             }
 
             this.clientID = clientID;
-            this.clientSecret = clientSecret;
-            this.domain = domain;
 
-            this.client = new RestClient("https://" + this.domain);
+            Uri parsedDomain;
+            if (Uri.TryCreate(domain, UriKind.Absolute, out parsedDomain) ||
+                Uri.TryCreate("https://" + domain, UriKind.Absolute, out parsedDomain))
+            {
+                this.client = new RestClient(parsedDomain);
+            }
+            else
+            {
+                throw new ArgumentException("the domain URI could not be parsed", "domain");
+            }
 
             if (webProxy != null)
             {
                 this.client.Proxy = webProxy;
             }
+
+            if (diagnostics == null)
+            {
+                diagnostics = DiagnosticsHeader.Default;
+            }
+            if (!Object.ReferenceEquals(diagnostics, DiagnosticsHeader.Suppress))
+            {
+                client.AddDefaultHeader("Auth0-Client", diagnostics.ToString());
+            }
+        }
+
+        private string GetClientSecretOrThrow()
+        {
+            if (string.IsNullOrEmpty(clientSecret))
+            {
+                throw new InvalidOperationException("This operation requires a clientSecret, which was not provided. Use the constructor that receives the clientSecret as an argument.");
+            }
+
+            return this.clientSecret;
         }
 
         /// <summary>
@@ -95,7 +135,7 @@ namespace Auth0
         public CreateConnectionResult CreateConnection(ProvisioningTicket provisioningTicket)
         {
             var connectionTicket = new Connection(
-                provisioningTicket.strategy, 
+                provisioningTicket.strategy,
                 provisioningTicket.options["tenant_domain"]);
 
             var extraProperties = provisioningTicket.options.Keys.Except(
@@ -114,6 +154,10 @@ namespace Auth0
                     worked = true,
                     provisioning_ticket_url = connection.ProvisioningTicketUrl
                 };
+            }
+            catch (InvalidOperationException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -136,7 +180,7 @@ namespace Auth0
 
             var request = new RestRequest("/api/connections?access_token=" + accessToken, Method.POST);
             request.JsonSerializer = new RestSharp.Serializers.JsonSerializer();
-            
+
             request.RequestFormat = DataFormat.Json;
             request.AddHeader("Content-Type", "application/json");
             request.AddBody(ticket);
@@ -144,9 +188,7 @@ namespace Auth0
             var result = this.client.Execute(request);
             if (result.StatusCode != HttpStatusCode.OK && result.StatusCode != HttpStatusCode.Created)
             {
-                var detail = GetErrorDetails(result.Content);
-                throw new InvalidOperationException(
-                    string.Format("{0} - {1}", result.StatusDescription, detail));
+                throw new InvalidOperationException(GetErrorDetails(result));
             }
 
             return JsonConvert.DeserializeObject<Connection>(result.Content);
@@ -160,7 +202,7 @@ namespace Auth0
         {
             var accessToken = this.GetAccessToken();
             var request = new RestRequest("/api/connections/{name}?access_token={accessToken}", Method.DELETE);
-            
+
             request.AddParameter("name", connectionName, ParameterType.UrlSegment);
             request.AddParameter("accessToken", accessToken, ParameterType.UrlSegment);
 
@@ -269,26 +311,38 @@ namespace Auth0
         public TokenResult ExchangeAuthorizationCodePerAccessToken(string code, string redirectUri)
         {
             var request = new RestRequest("/oauth/token", Method.POST);
-            
+
             request.AddHeader("accept", "application/json");
 
             request.AddParameter("client_id", this.clientID, ParameterType.GetOrPost);
-            request.AddParameter("client_secret", this.clientSecret, ParameterType.GetOrPost);
+            request.AddParameter("client_secret", this.GetClientSecretOrThrow(), ParameterType.GetOrPost);
             request.AddParameter("code", code, ParameterType.GetOrPost);
             request.AddParameter("grant_type", "authorization_code", ParameterType.GetOrPost);
             request.AddParameter("redirect_uri", redirectUri, ParameterType.GetOrPost);
 
-            var response = this.client.Execute<Dictionary<string, string>>(request).Data;
+            var response = this.client.Execute<Dictionary<string, string>>(request);
 
-            if (response.ContainsKey("error") || response.ContainsKey("error_description"))
+            if (response.ResponseStatus != ResponseStatus.Completed)
             {
-                throw new OAuthException(response["error_description"], response["error"]);
+                throw new OAuthException(
+                    "The Auth0 API did not return a complete response; ResponseStatus=" + response.ResponseStatus + "; ErrorMessage=" + response.ErrorMessage ?? string.Empty, 
+                    string.Empty);
+            }
+
+            var body = response.Data;
+            if (response.StatusCode != HttpStatusCode.OK)
+            {
+                var errorDescription = (body != null && body.ContainsKey("error_description")) ? body["error_description"] : "(no description)";
+                errorDescription += "; StatusCode=" + (int)response.StatusCode;
+                var errorCode = (body != null && body.ContainsKey("error")) ? body["error"] : string.Empty;
+
+                throw new OAuthException(errorDescription, errorCode);
             }
 
             return new TokenResult
             {
-                AccessToken = response["access_token"],
-                IdToken = response.ContainsKey("id_token") ? response["id_token"] : string.Empty
+                AccessToken = body["access_token"],
+                IdToken = body.ContainsKey("id_token") ? body["id_token"] : string.Empty
             };
         }
 
@@ -297,7 +351,7 @@ namespace Auth0
         /// </summary>
         /// <param name="accessToken">The access token.</param>
         /// <returns>An instance of UserProfile contaning the user information.</returns>
-        [ObsoleteAttribute("This method is obsolete. Call GetUserInfo(TokenResult tokenResult) instead.")] 
+        [ObsoleteAttribute("This method is obsolete. Call GetUserInfo(TokenResult tokenResult) instead.")]
         public UserProfile GetUserInfo(string accessToken)
         {
             return this.GetUserInfo(new TokenResult { AccessToken = accessToken });
@@ -332,7 +386,7 @@ namespace Auth0
         /// <summary>
         /// Gets user information from the internal id (_id).
         /// </summary>
-        /// <param name="internalId">The internal id.</param>
+        /// <param name="userId">The internal id.</param>
         /// <returns>An instance of UserProfile contaning the user information.</returns>
         public UserProfile GetUser(string userId)
         {
@@ -350,7 +404,7 @@ namespace Auth0
             var response = this.client.Execute(request);
             if (response.StatusCode != HttpStatusCode.OK)
             {
-                throw new InvalidOperationException(GetErrorDetails(response.Content));
+                throw new InvalidOperationException(GetErrorDetails(response));
             }
 
             var userProfile = this.GetUserProfileFromJson(response.Content);
@@ -379,7 +433,7 @@ namespace Auth0
 
             var userProfile = JsonConvert.DeserializeObject<UserProfile>(jsonProfile);
             var responseData = JsonConvert.DeserializeObject<Dictionary<string, object>>(jsonProfile);
-           
+
             userProfile.ExtraProperties = responseData != null ?
                 ConvertJArrayToStringArray(ExcludeKeys(responseData, ignoredProperties)) :
                 new Dictionary<string, object>();
@@ -400,7 +454,7 @@ namespace Auth0
                     DeserializeIdentityExtraProperties(userProfile, identitiesExtraPropertiesStringArray);
                 }
             }
-            
+
             return userProfile;
         }
 
@@ -411,10 +465,12 @@ namespace Auth0
 
         private static Dictionary<string, object> ConvertJArrayToStringArray(Dictionary<string, object> extraProperties)
         {
-            return extraProperties.Select(kvp => {
-               if (kvp.Value is JArray){
-                   return new KeyValuePair<string, object>(kvp.Key, ((JArray)kvp.Value).Select(v => v.ToString()).ToArray());
-               }
+            return extraProperties.Select(kvp =>
+            {
+                if (kvp.Value is JArray)
+                {
+                    return new KeyValuePair<string, object>(kvp.Key, ((JArray)kvp.Value).Select(v => v.ToString()).ToArray());
+                }
 
                 return kvp;
             }).ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
@@ -467,7 +523,7 @@ namespace Auth0
             request.AddHeader("accept", "application/json");
 
             request.AddParameter("client_id", this.clientID, ParameterType.GetOrPost);
-            request.AddParameter("client_secret", this.clientSecret, ParameterType.GetOrPost);
+            request.AddParameter("client_secret", this.GetClientSecretOrThrow(), ParameterType.GetOrPost);
             request.AddParameter("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer", ParameterType.GetOrPost);
             request.AddParameter("id_token", token, ParameterType.GetOrPost);
             request.AddParameter("target", targetClientId, ParameterType.GetOrPost);
@@ -551,7 +607,7 @@ namespace Auth0
         /// Block a user by setting block metadata to true
         /// </summary>
         /// <param name="userId">The userId to be blocked</param>
-        public void BlockUser(string userId) 
+        public void BlockUser(string userId)
         {
             this.PatchUser(userId, new { blocked = true });
         }
@@ -611,8 +667,7 @@ namespace Auth0
             var result = this.client.Execute(request);
             if (result.StatusCode != HttpStatusCode.OK)
             {
-                var detail = GetErrorDetails(result.Content);
-                throw new InvalidOperationException(string.Format("{0} - {1}", result.StatusDescription, detail));
+                throw new InvalidOperationException(GetErrorDetails(result));
             }
         }
 
@@ -631,7 +686,7 @@ namespace Auth0
             var accessToken = this.GetAccessToken();
 
             var request = new RestRequest("/api/users/" + userId + "/metadata?access_token=" + accessToken, method);
-            
+
             request.JsonSerializer = new RestSharp.Serializers.JsonSerializer();
             request.RequestFormat = DataFormat.Json;
             request.AddHeader("Content-Type", "application/json");
@@ -640,9 +695,7 @@ namespace Auth0
             var result = this.client.Execute(request);
             if (result.StatusCode != HttpStatusCode.OK && result.StatusCode != HttpStatusCode.Created)
             {
-                var detail = GetErrorDetails(result.Content);
-                throw new InvalidOperationException(
-                    string.Format("{0} - {1}", result.StatusDescription, detail));
+                throw new InvalidOperationException(GetErrorDetails(result));
             }
         }
 
@@ -662,6 +715,19 @@ namespace Auth0
         /// <summary>
         /// Creates a new user (only valid for database connections).
         /// </summary>
+        /// <param name="identifier">The user's identifier.</param>
+        /// <param name="password">The password for the new user.</param>
+        /// <param name="connection">The name of the database connection to store the user.</param>
+        /// <param name="emailVerified">True if the emails is already verified, false if a verification message is required.</param>
+        /// <returns>The profile of the user created.</returns>
+        public UserProfile CreateUser(UserIdentifier identifier, string password, string connection, bool emailVerified)
+        {
+            return this.CreateUser(identifier, password, connection, emailVerified, null);
+        }
+
+        /// <summary>
+        /// Creates a new user (only valid for database connections).
+        /// </summary>
         /// <param name="email">The user's email.</param>
         /// <param name="password">The password for the new user.</param>
         /// <param name="connection">The name of the database connection to store the user.</param>
@@ -671,7 +737,21 @@ namespace Auth0
         public UserProfile CreateUser(
             string email, string password, string connection, bool emailVerified, IDictionary<string, object> metadata)
         {
-            return this.CreateUser(email, password, connection, emailVerified, (object) metadata);
+            return this.CreateUser(email, password, connection, emailVerified, (object)metadata);
+        }
+
+        /// <summary>
+        /// Creates a new user (only valid for database connections).
+        /// </summary>
+        /// <param name="identifier">The user's identifier.</param>
+        /// <param name="password">The password for the new user.</param>
+        /// <param name="connection">The name of the database connection to store the user.</param>
+        /// <param name="emailVerified">True if the emails is already verified, false if a verification message is required.</param>
+        /// <param name="metadata">Additional metadata to include in the user's profile.</param>
+        /// <returns>The profile of the user created.</returns>
+        public UserProfile CreateUser(UserIdentifier identifier, string password, string connection, bool emailVerified, IDictionary<string, object> metadata)
+        {
+            return this.CreateUser(identifier, password, connection, emailVerified, (object)metadata);
         }
 
         /// <summary>
@@ -690,6 +770,20 @@ namespace Auth0
                 throw new ArgumentNullException("email");
             }
 
+            return this.CreateUser(UserIdentifier.Email(email), password, connection, emailVerified, metadata);
+        }
+
+        /// <summary>
+        /// Creates a new user (only valid for database connections).
+        /// </summary>
+        /// <param name="identifier">The user's identifier.</param>
+        /// <param name="password">The password for the new user.</param>
+        /// <param name="connection">The name of the database connection to store the user.</param>
+        /// <param name="emailVerified">True if the emails is already verified, false if a verification message is required.</param>
+        /// <param name="metadata">Additional metadata to include in the user's profile.</param>
+        /// <returns>The profile of the user created.</returns>
+        public UserProfile CreateUser(UserIdentifier identifier, string password, string connection, bool emailVerified, object metadata)
+        {
             if (string.IsNullOrEmpty(password))
             {
                 throw new ArgumentNullException("password");
@@ -710,10 +804,10 @@ namespace Auth0
 
             var requestBodyDict = metadata == null
                                   ? new Dictionary<string, object>()
-                                  // from object to json and back to dictionary
+                // from object to json and back to dictionary
                                   : JsonConvert.DeserializeObject<Dictionary<string, object>>(
                                       JsonConvert.SerializeObject(metadata));
-            requestBodyDict["email"] = email;
+            requestBodyDict[identifier.Type.ToString().ToLowerInvariant()] = identifier.Value;
             requestBodyDict["password"] = password;
             requestBodyDict["connection"] = connection;
             requestBodyDict["email_verified"] = emailVerified;
@@ -722,9 +816,7 @@ namespace Auth0
             var result = this.client.Execute(request);
             if (result.StatusCode != HttpStatusCode.OK && result.StatusCode != HttpStatusCode.Created)
             {
-                var detail = GetErrorDetails(result.Content);
-                throw new InvalidOperationException(
-                    string.Format("{0} - {1}", result.StatusDescription, detail));
+                throw new InvalidOperationException(GetErrorDetails(result));
             }
             var userProfile = GetUserProfileFromJson(result.Content);
 
@@ -761,9 +853,47 @@ namespace Auth0
             var result = this.client.Execute(request);
             if (result.StatusCode != HttpStatusCode.OK && result.StatusCode != HttpStatusCode.Created)
             {
-                var detail = GetErrorDetails(result.Content);
-                throw new InvalidOperationException(
-                    string.Format("{0} - {1}", result.StatusDescription, detail));
+                throw new InvalidOperationException(GetErrorDetails(result));
+            }
+        }
+
+        /// <summary>
+        /// Changes a user password (only for database connections).
+        /// </summary>
+        /// <param name="email">The email address of the user.</param>
+        /// <param name="newPassword">The new password to set.</param>
+        /// <param name="connection">The name of the connection in which the user exists.</param>
+        /// <param name="verify">True if a verification email message is required, false otherwise.</param>
+        public void ChangePassword(string email, string newPassword, string connection, bool verify)
+        {
+            if (string.IsNullOrEmpty(email))
+            {
+                throw new ArgumentNullException("email");
+            }
+
+            if (string.IsNullOrEmpty(newPassword))
+            {
+                throw new ArgumentNullException("newPassword");
+            }
+
+            if (string.IsNullOrEmpty(connection))
+            {
+                throw new ArgumentNullException("connection");
+            }
+
+            var accessToken = this.GetAccessToken();
+
+            var request = new RestRequest("/api/users/" + email + "/password?access_token=" + accessToken, Method.PUT);
+
+            request.JsonSerializer = new RestSharp.Serializers.JsonSerializer();
+            request.RequestFormat = DataFormat.Json;
+            request.AddHeader("Content-Type", "application/json");
+            request.AddBody(new { password = newPassword, verify, email, connection });
+
+            var result = this.client.Execute(request);
+            if (result.StatusCode != HttpStatusCode.OK && result.StatusCode != HttpStatusCode.Created)
+            {
+                throw new InvalidOperationException(GetErrorDetails(result));
             }
         }
 
@@ -796,9 +926,33 @@ namespace Auth0
             var result = this.client.Execute(request);
             if (result.StatusCode != HttpStatusCode.OK && result.StatusCode != HttpStatusCode.Created)
             {
-                var detail = GetErrorDetails(result.Content);
-                throw new InvalidOperationException(
-                    string.Format("{0} - {1}", result.StatusDescription, detail));
+                throw new InvalidOperationException(GetErrorDetails(result));
+            }
+        }
+
+        /// <summary>
+        /// Unlink an identity from the primary account/identity
+        /// </summary>
+        /// <param name="userId">the userId that must be unlinked in the provider|id format</param>
+        /// <param name="accessToken">primary identity access token</param>
+        public void Unlink(string userId, string accessToken)
+        {
+            if (string.IsNullOrEmpty(userId))
+            {
+                throw new ArgumentNullException("userId");
+            }
+
+            var request = new RestRequest("/unlink", Method.POST);
+
+            request.JsonSerializer = new RestSharp.Serializers.JsonSerializer();
+            request.RequestFormat = DataFormat.Json;
+            request.AddHeader("Content-Type", "application/json");
+            request.AddBody(new { access_token = accessToken, user_id = userId, clientID = clientID });
+
+            var result = this.client.Execute(request);
+            if (result.StatusCode != HttpStatusCode.OK)
+            {
+                throw new InvalidOperationException(GetErrorDetails(result));
             }
         }
 
@@ -822,9 +976,7 @@ namespace Auth0
             var result = this.client.Execute(request);
             if (result.StatusCode != HttpStatusCode.OK)
             {
-                var detail = GetErrorDetails(result.Content);
-                throw new InvalidOperationException(
-                    string.Format("{0} - {1}", result.StatusDescription, detail));
+                throw new InvalidOperationException(GetErrorDetails(result));
             }
         }
 
@@ -843,9 +995,7 @@ namespace Auth0
 
             if (result.StatusCode != HttpStatusCode.OK)
             {
-                var detail = GetErrorDetails(result.Content);
-                throw new InvalidOperationException(
-                    string.Format("{0} - {1}", result.StatusDescription, detail));
+                throw new InvalidOperationException(GetErrorDetails(result));
             }
         }
 
@@ -875,28 +1025,95 @@ namespace Auth0
             }
 
             var result = this.client.Execute<Dictionary<string, string>>(request);
-
             if (result.StatusCode != HttpStatusCode.OK)
             {
-                var detail = GetErrorDetails(result.Content);
-                throw new InvalidOperationException(
-                    string.Format("{0} - {1}", result.StatusDescription, detail));
+                throw new InvalidOperationException(GetErrorDetails(result));
             }
 
             return result.Data["ticket"];
         }
 
-        private static string GetErrorDetails(string resultContent)
+        /// <summary>
+        /// Generates verification ticket.
+        /// </summary>
+        /// <param name="userId"></param>
+        /// <param name="resultUrl">Post verification url</param>
+        /// <returns></returns>
+        public string GenerateVerificationTicket(string userId, string resultUrl = null)
         {
-            try
+            if (string.IsNullOrEmpty(userId))
             {
-                return JsonConvert.DeserializeObject(resultContent).ToString();
-            }
-            catch (JsonReaderException)
-            {
+                throw new ArgumentNullException("userId");
             }
 
-            return resultContent;
+            var accessToken = this.GetAccessToken();
+
+            var request = new RestRequest("/api/users/" + userId + "/verification_ticket?access_token=" + accessToken, Method.POST);
+            request.JsonSerializer = new RestSharp.Serializers.JsonSerializer();
+
+            if (!string.IsNullOrEmpty(resultUrl))
+            {
+                request.AddParameter("resultUrl", resultUrl, ParameterType.GetOrPost);
+            }
+
+            var result = this.client.Execute<Dictionary<string, string>>(request);
+
+            if (result.StatusCode != HttpStatusCode.OK)
+            {
+                throw new InvalidOperationException(GetErrorDetails(result));
+            }
+
+            return result.Data["ticket"];
+        }
+
+        /// <summary>
+        /// Validate the username and password for a specific connection.
+        /// </summary>
+        /// <param name="username">The username.</param>
+        /// <param name="password">The password.</param>
+        /// <param name="connection">The connection name.</param>
+        public UserValidationResult ValidateUser(string username, string password, string connection)
+        {
+            if (string.IsNullOrEmpty(username))
+            {
+                throw new ArgumentNullException("username");
+            }
+
+            if (string.IsNullOrEmpty(password))
+            {
+                throw new ArgumentNullException("password");
+            }
+
+            if (string.IsNullOrEmpty(connection))
+            {
+                throw new ArgumentNullException("connection");
+            }
+
+            var request = new RestRequest("/public/api/users/validate_userpassword", Method.POST);
+            request.AddHeader("Content-Type", "application/x-www-form-urlencoded");
+            request.AddParameter("connection", connection);
+            request.AddParameter("username", username);
+            request.AddParameter("password", password);
+            request.AddParameter("client_id", clientID);
+
+            var result = this.client.Execute(request);
+            if (result.StatusCode != HttpStatusCode.OK && result.StatusCode != HttpStatusCode.NotFound)
+            {
+                throw new InvalidOperationException(GetErrorDetails(result));
+            }
+
+            return new UserValidationResult
+            {
+                IsValid = result.StatusCode == HttpStatusCode.OK,
+                Message = result.Content
+            };
+        }
+
+        private static string GetErrorDetails(IRestResponse response)
+        {
+            var detail = response.Content ?? "No error details available";
+
+            return string.Format("{0} - {1}", response.StatusDescription, detail);
         }
 
         private string GetJsonProfileFromIdToken(string idToken)
@@ -915,7 +1132,7 @@ namespace Auth0
             var response = this.client.Execute(request);
             if (response.StatusCode == HttpStatusCode.Unauthorized)
             {
-                throw new InvalidOperationException(GetErrorDetails(response.Content));
+                throw new InvalidOperationException(GetErrorDetails(response));
             }
 
             return response.Content;
@@ -932,7 +1149,7 @@ namespace Auth0
 
             request.AddHeader("accept", "application/json");
             request.AddParameter("client_id", this.clientID, ParameterType.GetOrPost);
-            request.AddParameter("client_secret", this.clientSecret, ParameterType.GetOrPost);
+            request.AddParameter("client_secret", this.GetClientSecretOrThrow(), ParameterType.GetOrPost);
             request.AddParameter("grant_type", "client_credentials", ParameterType.GetOrPost);
 
             var response = this.client.Execute<Dictionary<string, string>>(request);
@@ -943,8 +1160,7 @@ namespace Auth0
             }
             else if (response.StatusCode != HttpStatusCode.OK && response.StatusCode != HttpStatusCode.NotModified)
             {
-                throw new InvalidOperationException(
-                    string.Format("{0} - {1}", response.StatusCode, GetErrorDetails(response.Content)));
+                throw new InvalidOperationException(GetErrorDetails(response));
             }
 
             var tk = response.Data["access_token"];
@@ -958,7 +1174,7 @@ namespace Auth0
             var request = new RestRequest("/api/connections");
             request.AddParameter("only_socials", onlySocials);
             request.AddParameter("only_enterprise", onlyEnterprise);
-            
+
             if (pageSize > 0)
             {
                 request.AddParameter("per_page", pageSize);
@@ -1003,12 +1219,10 @@ namespace Auth0
 
         private Page<T> LoadPageFromLink<T>(string url)
         {
-            // URL is absolute, so we cannot use previously created client (it has a base URL)
-            var client = new RestClient();
-            var request = new RestRequest(url);
+            var request = new RestRequest(new Uri(url));
             request.AddHeader("accept", "application/json");
 
-            var response = client.Execute(request);
+            var response = this.client.Execute(request);
             return BuildPage<T>(response);
         }
 
@@ -1046,7 +1260,7 @@ namespace Auth0
             var entries = linksHeader.Value.ToString().Split(',');
 
             return entries.ToDictionary(
-                e => Regex.Match(e, "rel=\"(.*)\"").Groups[1].Value, 
+                e => Regex.Match(e, "rel=\"(.*)\"").Groups[1].Value,
                 e => Regex.Match(e, "<(.*)>").Groups[1].Value);
         }
 

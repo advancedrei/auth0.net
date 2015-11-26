@@ -35,7 +35,7 @@ var connectionTicket =  new Auth0.Connection("office365", "contoso.com");
 
 var newConnection = client.CreateConnection(connectionTicket);
 
-// newConnection will have ProvisioningTicketUrl 
+// newConnection will have ProvisioningTicketUrl
 ~~~
 
 Because this example uses Office 365, the returned connection object will have a ```ProvisioningTicketUrl``` property to which you have to redirect the client in order to complete the authorization process.
@@ -90,14 +90,86 @@ var users = client.GetEnterpriseUsers("jdoe@contoso.com");
 var users = client.GetEnterpriseUsers();
 ~~~
 
+### client.GenerateVerificationTicket(userId, resultUrl = "")
+
+Generate an email verification link which can be added to custom emails an be used for email verification. Clicking this link will set ```email_verified``` to true for the user and optionally redirect to a page in the application.
+
+~~~csharp
+var verificationUrl = client.GenerateVerificationTicket("auth0|54c6322f6936d15310dca942");
+// or
+var verificationUrl = client.GenerateVerificationTicket("auth0|54c6322f6936d15310dca942",
+   "http://myapp.com/activated");
+~~~
+
+### client.ValidateUser(username, password, connection)
+
+Verify if the username and password are correct for a given connection.
+
+~~~csharp
+var validationResult = client.ValidateUser("some@user.com", "Passw0rd!", "Username-Password-Authentication");
+if (validationResult.IsValid)
+{
+    return "User is valid.";
+}
+else
+{
+    return "Invalid user. Details: " + validationResult.Message;
+}
+~~~
+
+## Diagnostic Headers
+
+By default this SDK will send the diagnostic HTTP request header `Auth0-Client` to the Auth0 REST API.  The header contains information about the version of the SDK, its dependencies, and the execution environment.
+
+If you do not wish to pass this header, you can opt out by passing the `DiagnosticsHeader.Suppress` instance to the `diagnostics` `Auth0.Client` constructor parameter:
+
+~~~csharp
+var client = new Auth0.Client(
+  clientID:     "your-client-id",
+  clientSecret: "your-client-secret",
+  domain:       "yourdomain.auth0.com",
+  //suppress the Auth0-Client header
+  diagnostics: Auth0.DiagnosticsHeader.Suppress
+);
+~~~
+
+Alternatively, if you'd like to pass additional diagnostic information to Auth0 you can easily add environment information using the `DiagnosticsHeader.Default` instance:
+
+~~~csharp
+var client = new Auth0.Client(
+  clientID:     "your-client-id",
+  clientSecret: "your-client-secret",
+  domain:       "yourdomain.auth0.com",
+  //the AddEnvironment method takes a name and a version
+  diagnostics: Auth0.DiagnosticsHeader.Default
+    .AddEnvironment("SharePoint", "2010")
+    .AddEnvironment("VMWare ESXi", "6.0")
+);
+~~~
+
 ## Authentication
 
-This library is useful to consume the http api of Auth0, in order to authenticate users you can use the our [DotNetOpenAuth client](https://github.com/auth0/aspnet-auth0). 
+This library is useful to consume the http api of Auth0, in order to authenticate users you can use our platform specific SDKs:
+* [ASP.NET OWIN](https://github.com/auth0/auth0-aspnet-owin)
+* [ASP.NET](https://github.com/auth0/auth0-aspnet)
+* [Winforms or WPF](https://github.com/auth0/Auth0.WinformsWPF)
+* [Windows Phone](https://github.com/auth0/Auth0.WindowsPhone)
+* [Windows 8 C#](https://github.com/auth0/Auth0.Windows8.Cs)
+* [Windows 8 JS](https://github.com/auth0/Auth0.Windows8.Js)
+* [WCF](https://docs.auth0.com/wcf-tutorial)
 
 ## Documentation
 
 For more information about [auth0](http://auth0.com) visit our [documentation page](http://docs.auth0.com/).
 
+## Issue Reporting
+
+If you have found a bug or if you have a feature request, please report them at this repository issues section. Please do not report security vulnerabilities on the public GitHub issue tracker. The [Responsible Disclosure Program](https://auth0.com/whitehat) details the procedure for disclosing security issues.
+
+## Author
+
+[Auth0](auth0.com)
+
 ## License
 
-This client library is MIT licensed.
+This project is licensed under the MIT license. See the [LICENSE](LICENSE.txt) file for more info.
